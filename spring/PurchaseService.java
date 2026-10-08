@@ -1,6 +1,9 @@
 package practice;
 
 import java.math.BigDecimal;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
+import jakarta.persistence.PersistenceContext;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -10,6 +13,9 @@ public class PurchaseService {
     private final PurchaseRepository purchases;
     private final PaymentStub payments;
 
+    @PersistenceContext
+    private EntityManager entityManager;
+
     public PurchaseService(ListingRepository listings, PurchaseRepository purchases,
                            PaymentStub payments) {
         this.listings = listings;
@@ -17,20 +23,27 @@ public class PurchaseService {
         this.payments = payments;
     }
 
-    @Transactional
+    @Transactional(rollbackFor = PaymentDeclined.class)
     public PurchaseView buy(long callerId, BuyRequest request) throws PaymentDeclined {
-        Listing listing = listings.findById(request.listingId())
-                .orElseThrow(NotFound::new);
+        if (callerId != request.buyerId()) {
+            throw new Forbidden();
+        }
+
+        Listing listing = entityManager.find(
+                Listing.class, request.listingId(), LockModeType.PESSIMISTIC_WRITE);
+        if (listing == null) {
+            throw new NotFound();
+        }
         if (listing.getRemaining() < request.quantity()) {
             throw new OutOfStock();
         }
-        BigDecimal total = request.unitPrice()
+        BigDecimal total = listing.getUnitPrice()
                 .multiply(BigDecimal.valueOf(request.quantity()));
         listing.setRemaining(listing.getRemaining() - request.quantity());
         listings.saveAndFlush(listing);
-        payments.authorize(request.buyerId(), total);
+        payments.authorize(callerId, total);
         Purchase purchase = purchases.save(new Purchase(
-                request.buyerId(), listing.getId(), request.quantity(), total));
+                callerId, listing.getId(), request.quantity(), total));
         return new PurchaseView(purchase.getId(), purchase.getBuyerId(), total);
     }
 }

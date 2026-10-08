@@ -5,8 +5,8 @@
 ## 실행 환경과 요청 처리 경계
 
 - Java 17, Spring Boot 3.5 계열, Spring Framework 6.2, Spring Data JPA 3.5를 사용합니다. 버전이 다른 애플리케이션의 기본값을 가정하지 말고, 여기 명시된 동작을 기준으로 판단하세요.
-- 일반적인 Spring 프록시 기반 트랜잭션 관리가 활성화되어 있습니다. 컨트롤러는 주입받은 프록시 `PurchaseService` 빈의 public `buy` 메서드를 호출합니다. 자기 호출(self-invocation), 직접 생성한 서비스 인스턴스, 바깥쪽 트랜잭션, 별도의 롤백 규칙, 전역 `ALL_EXCEPTIONS` 롤백 설정은 없습니다.
-- 두 저장소는 같은 트랜잭션 매니저를 사용합니다. 데이터베이스의 격리 수준은 READ COMMITTED이며 일반적인 행 갱신을 수행합니다. SERIALIZABLE 격리 수준이나 별도로 숨겨진 애플리케이션 차원의 재고 보호 장치는 없습니다.
+- 일반적인 Spring 프록시 기반 트랜잭션 관리가 활성화되어 있습니다. 컨트롤러는 주입받은 프록시 `PurchaseService` 빈의 public `buy` 메서드를 호출합니다. 자기 호출(self-invocation), 직접 생성한 서비스 인스턴스, 바깥쪽 트랜잭션은 없습니다. 서비스 메서드에 명시한 `rollbackFor` 외에 별도의 롤백 규칙이나 전역 `ALL_EXCEPTIONS` 설정은 없습니다.
+- 두 저장소와 `PurchaseService`의 `@PersistenceContext` `EntityManager`는 같은 트랜잭션 매니저를 사용합니다. 데이터베이스의 격리 수준은 READ COMMITTED이며 일반적인 행 갱신을 수행합니다. SERIALIZABLE 격리 수준이나 별도로 숨겨진 애플리케이션 차원의 재고 보호 장치는 없습니다.
 - 인증된 요청을 처리하는 컨트롤러는 검증된 보안 principal에서 `callerId`를 얻습니다. 요청 본문에서 가져오지 않습니다. 컨트롤러는 `callerId`와 검증을 통과한 요청을 `buy`에 전달하고, 성공 시 HTTP 201을 반환합니다. principal은 유효한 구매자 계정을 식별합니다. 인증 과정 자체에서 이 값과 `buyerId`를 비교하지는 않습니다.
 - 요청 검증 단계는 필수 필드 누락, 0 이하의 ID, 1–10 범위를 벗어난 수량, 0.01–1000000.00 범위를 벗어나거나 소수점 이하가 두 자리를 초과하는 `unitPrice`를 HTTP 400으로 거절합니다. 검증을 통과한 요청만 서비스에 도달합니다. JSON의 금액은 십진수로 전달되며 `BigDecimal`로 파싱됩니다.
 - 요청과 응답의 구조는 다음과 같습니다.
@@ -30,7 +30,7 @@ interface ListingRepository extends JpaRepository<Listing, Long> {}
 interface PurchaseRepository extends JpaRepository<Purchase, Long> {}
 ```
 
-`findById`는 별도의 잠금을 요청하지 않는 일반적인 JPA 조회입니다. `saveAndFlush`는 현재 트랜잭션 안에서 대기 중인 변경을 데이터베이스로 flush하며, 해당 트랜잭션을 독립적으로 커밋하지 않습니다. 갱신 시에는 엔티티에서 계산한 `remaining`의 절대값을 기록합니다. SQL에서 원자적으로 재고를 차감하는 방식은 아닙니다. 모든 저장소 연산은 서비스의 트랜잭션에 참여합니다.
+`ListingRepository.findById`는 별도의 잠금을 요청하지 않는 일반적인 JPA 조회이며, 수정된 `PurchaseService`는 이를 재고 확인용으로 사용하지 않습니다. 서비스는 `EntityManager.find(Listing.class, id, LockModeType.PESSIMISTIC_WRITE)`로 상품을 읽어 트랜잭션이 끝날 때까지 행 잠금을 유지합니다. `saveAndFlush`는 현재 트랜잭션 안에서 대기 중인 변경을 데이터베이스로 flush하며, 해당 트랜잭션을 독립적으로 커밋하지 않습니다. 갱신 시에는 엔티티에서 계산한 `remaining`의 절대값을 기록합니다. SQL에서 원자적으로 재고를 차감하는 방식은 아닙니다. 모든 저장소 연산은 서비스의 트랜잭션에 참여합니다.
 
 ## 결제 컴포넌트
 
