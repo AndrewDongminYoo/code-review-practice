@@ -39,3 +39,30 @@ Flutter — 우선순위 2
 프레임워크/DB 지식 확인이 필요했던 부분: Spring의 기본 @Transactional 설정은 checked exception만으로 롤백하지 않습니다. PaymentDeclined가 checked exception이므로 결제 거절 시 재고 갱신이 커밋될 수 있습니다. Spring 공식 문서에서 기본 롤백 규칙을 확인했습니다: https://docs.spring.io/spring-framework/reference/6.2/data-access/transaction/declarative/rolling-back.html (이번 답안은 안내에 따라 각 영역의 우선순위 두 건을 기록했습니다.)
 심각해 보였지만 근거를 찾지 못한 부분: 해당 없음. 코드와 계약으로 확인한 결함만 기록했습니다.
 다음 연습에서 확인할 주제: READ COMMITTED에서 잠금·버전 컬럼 없이 재고를 읽고 절대값으로 갱신할 때 동시 구매가 초과 판매를 만들 수 있는지 검증합니다.
+
+모든 발생 가능한 이슈를 찾는 과제라면
+중복을 합쳐 Spring은 확정 결함 4건, Flutter는 확정 결함 2건과 조건부 생명주기 위험 1건으로 보고하겠습니다. 따라서 Flutter에서 컨트롤러가 요청 도중 dispose될 수 있는 사용처까지 범위에 포함하면 총 3건입니다. 앞의 우선순위 두 건은 위 항목을 참조하고, 아래에는 추가 발견을 같은 형식으로 기록합니다. Flutter의 오래된 결과·clear 후 결과 복원·loading 조기 해제는 같은 오래된 요청 수명 문제로 묶었습니다.
+
+Spring — 추가 지적 1
+파일/줄 또는 메서드: spring/PurchaseService.java:20–21, 29–31
+문제와 발생 조건: PaymentDeclined는 checked exception인데 @Transactional에 해당 예외의 롤백 규칙이 없습니다. 결제 거절 전에 재고를 갱신하고 flush했으므로 거절 예외가 프록시를 빠져나갈 때 기본 설정에서는 트랜잭션이 롤백되지 않고 재고 감소가 커밋될 수 있습니다.
+사용자/데이터에 미치는 영향: 결제 거절은 422로 처리되지만 구매 내역 없이 재고만 줄어듭니다. 재고가 실제보다 적게 보여 이후 구매자가 구매하지 못할 수 있습니다. 우선순위 P1.
+최소 수정 제안: @Transactional(rollbackFor = PaymentDeclined.class)를 지정하거나, 이 도메인 예외를 RuntimeException 기반으로 바꿔 롤백 규칙을 명확히 합니다.
+이 문제가 고쳐졌음을 확인할 테스트: 재고가 1인 상품에 결제 거절을 발생시키고 서비스 프록시 호출이 예외를 반환한 뒤, 별도 트랜잭션에서 재고가 1이며 구매 내역이 없는지 확인합니다.
+확신 수준 및 추가 확인할 점: 확정 결함. 계약은 PaymentDeclined가 checked exception이고 별도 롤백 규칙 및 ALL_EXCEPTIONS 설정이 없다고 명시합니다. Spring 기본 롤백 규칙 참고: https://docs.spring.io/spring-framework/reference/6.2/data-access/transaction/declarative/rolling-back.html
+
+Spring — 추가 지적 2
+파일/줄 또는 메서드: spring/PurchaseService.java:22–30, 32–33
+문제와 발생 조건: 재고를 잠금 없이 읽고 남은 수량을 메모리에서 계산한 절대값으로 저장합니다. 남은 수량이 1일 때 서로 다른 구매자의 요청 두 개가 동시에 1을 읽으면 두 트랜잭션 모두 재고를 0으로 갱신하고 구매 내역을 각각 만들 수 있습니다.
+사용자/데이터에 미치는 영향: 마지막 한 개를 두 구매자에게 모두 판매해 성공 응답을 보내므로 재고 규칙을 위반하고 초과 판매가 발생합니다. 우선순위 P1.
+최소 수정 제안: 행 잠금으로 읽기·검사·차감을 직렬화하거나, 조건부 원자 재고 차감으로 한 요청만 성공하도록 합니다.
+이 문제가 고쳐졌음을 확인할 테스트: READ COMMITTED에서 두 요청이 재고 1을 읽도록 동기화해 동시에 구매하게 하고, 정확히 한 요청만 성공하며 구매 내역도 하나만 생성되는지 확인합니다.
+확신 수준 및 추가 확인할 점: 확정 결함. 계약은 일반 조회, READ COMMITTED, 버전 컬럼·잠금·별도 재고 보호가 없고 절대값 갱신을 명시합니다.
+
+Flutter — 추가 지적 1
+파일/줄 또는 메서드: flutter/search_controller.dart:26–33
+문제와 발생 조건: 검색 Future가 대기 중인 동안 소유자가 SearchController를 dispose한 뒤 저장소 Future가 완료되면, 검색 코드가 finally에서 notifyListeners()를 호출합니다. ChangeNotifier는 dispose 이후 notifyListeners() 호출을 허용하지 않습니다.
+사용자/데이터에 미치는 영향: 화면 전환 등으로 컨트롤러가 먼저 폐기되면 비동기 완료 시 assertion/error가 발생할 수 있습니다. 우선순위 P2, 컨트롤러를 요청 중 dispose하는 사용처가 있을 때 발생하는 조건부 위험입니다.
+최소 수정 제안: dispose 시 진행 중 요청을 무효화하고, 비동기 완료 경로에서 폐기된 컨트롤러가 상태를 갱신하거나 notifyListeners()를 호출하지 않도록 합니다.
+이 문제가 고쳐졌음을 확인할 테스트: Completer를 시작한 뒤 컨트롤러를 dispose하고 Future를 완료해도 비동기 예외나 dispose 이후 알림이 발생하지 않는지 확인합니다.
+확신 수준 및 추가 확인할 점: ChangeNotifier 계약상 dispose 이후 알림은 금지됩니다. 이 예제에는 SearchController 소유자나 화면 수명주기 코드가 없으므로 실제 발생 여부는 사용처를 확인해야 합니다. Flutter API 참고: https://api.flutter.dev/flutter/foundation/ChangeNotifier/notifyListeners.html
